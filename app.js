@@ -133,11 +133,40 @@ async function nominatim(q, limit = 8) {
     `&accept-language=it&limit=${limit}&viewbox=${ROME_VIEWBOX}&bounded=1&q=${encodeURIComponent(q)}`;
   return (await getJSON(u)).map(normNominatim);
 }
+// Photon (komoot) tollera gli errori di battitura: "colloseo", "fontana trevy"...
+async function photon(q, limit = 10) {
+  const [l, t, r, b] = ROME_VIEWBOX.split(',');
+  const u = `https://photon.komoot.io/api/?q=${encodeURIComponent(q)}&limit=${limit}&lat=41.9&lon=12.49&bbox=${l},${b},${r},${t}`;
+  const d = await getJSON(u);
+  return (d.features || []).map((f) => {
+    const p = f.properties || {};
+    return {
+      osm: { N: 'node', W: 'way', R: 'relation' }[p.osm_type] + '/' + p.osm_id,
+      name: p.name || p.street || q,
+      lat: f.geometry.coordinates[1], lon: f.geometry.coordinates[0],
+      address: [[p.street, p.housenumber].filter(Boolean).join(' '), p.district || p.locality].filter(Boolean).join(', '),
+      kind: p.osm_value, cls: p.osm_key, tags: {}, needTags: true,
+    };
+  }).filter((x) => x.name);
+}
+// Tag completi (orari, prezzi, wikipedia) per un risultato Photon
+async function osmTags(osm) {
+  const [type, id] = osm.split('/');
+  const d = await getJSON(`https://nominatim.openstreetmap.org/lookup?format=jsonv2&extratags=1&addressdetails=1&accept-language=it&osm_ids=${type[0].toUpperCase()}${id}`);
+  return d[0] ? normNominatim(d[0]) : null;
+}
+// Wikipedia corregge i nomi sbagliati ("Did you mean")
+async function wikiSuggest(q) {
+  const d = await getJSON(`https://it.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(q + ' Roma')}&srinfo=suggestion&srlimit=3&srprop=&format=json&origin=*`);
+  const sug = d.query?.searchinfo?.suggestion?.replace(/\s*roma\s*$/i, '');
+  return { suggestion: sug, titles: (d.query?.search || []).map((x) => x.title) };
+}
 const FOOD_TYPES = /^(restaurant|cafe|fast_food|pub|bar|ice_cream|food_court|biergarten|bakery|pastry|confectionery|deli)$/;
+const JUNK_TYPES = /^(bus_stop|platform|stop_position|stop|tram_stop|subway_entrance|parking|parking_entrance|bicycle_parking|taxi|vending_machine|waste_basket|bench|atm|post_box)$/;
 
-function renderResults(box, items, kind, onPick) {
+function renderResults(box, items, kind, onPick, note) {
   if (!items.length) { box.innerHTML = '<div class="info">Nessun risultato. Prova con un altro nome.</div>'; return; }
-  box.innerHTML = items.map((it, i) => `
+  box.innerHTML = (note ? `<div class="info">${note}</div>` : '') + items.map((it, i) => `
     <div class="result">
       <div class="txt">
         <div class="name">${esc(it.name)}</div>
@@ -154,17 +183,42 @@ function renderResults(box, items, kind, onPick) {
   };
 }
 
+// Ricerca tollerante: Nominatim + Photon in parallelo; se non trova nulla, prova la correzione di Wikipedia
+async function smartSearch(q, kind) {
+  const run = async (term) => {
+    const [a, b] = await Promise.allSettled([nominatim(term, 10), photon(term, 12)]);
+    const all = [...(a.value || []), ...(b.value || [])];
+    const seen = new Set(), out = [];
+    for (const r of all) {
+      if (seen.has(r.osm)) continue; seen.add(r.osm);
+      if (JUNK_TYPES.test(r.kind)) continue;
+      out.push(r);
+    }
+    if (a.status === 'rejected' && b.status === 'rejected') throw new Error('offline');
+    return out;
+  };
+  let res = await run(q), note = '';
+  if (kind === 'food') { const f = res.filter((r) => FOOD_TYPES.test(r.kind)); if (f.length) res = f; }
+  if (res.length < 2) {
+    try {
+      const w = await wikiSuggest(q);
+      const terms = [w.suggestion, ...w.titles].filter((t) => t && t.toLowerCase() !== q.toLowerCase()).slice(0, 2);
+      for (const t of terms) {
+        const more = (await run(t)).filter((r) => !res.some((x) => x.osm === r.osm));
+        if (more.length) { res = res.concat(more); note = `Forse cercavi <b>${esc(t)}</b>?`; break; }
+      }
+    } catch {}
+  }
+  return { res: res.slice(0, 12), note };
+}
+
 async function doSearch(kind, q) {
   const box = kind === 'places' ? $('#placesResults') : $('#foodResults');
   if (!q.trim()) return;
   box.innerHTML = '<div class="info"><span class="spin"></span> Cerco…</div>';
   try {
-    let res = await nominatim(q, 10);
-    if (kind === 'food') {
-      const food = res.filter((r) => FOOD_TYPES.test(r.kind));
-      res = food.length ? food : res;
-    }
-    renderResults(box, res, kind);
+    const { res, note } = await smartSearch(q.trim(), kind);
+    renderResults(box, res, kind, null, note);
   } catch (err) {
     box.innerHTML = '<div class="info">Ricerca non riuscita. Controlla la connessione e riprova.</div>';
   }
@@ -172,23 +226,51 @@ async function doSearch(kind, q) {
 
 /* ---------------- Enrichment (immagine, descrizione) ---------------- */
 async function wikiSummary(lang, title) {
-  const d = await getJSON(`https://${lang}.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(title.replace(/ /g, '_'))}`);
-  return {
-    image: d.originalimage?.width && d.originalimage.width <= 1600 ? d.originalimage.source
-      : d.thumbnail?.source ? d.thumbnail.source.replace(/\/\d+px-/, '/800px-') : '',
-    extract: d.extract,
-    wiki: d.content_urls?.desktop?.page,
-  };
+  const d = await getJSON(`https://${lang}.wikipedia.org/w/api.php?action=query&titles=${encodeURIComponent(title)}` +
+    `&prop=pageimages|extracts|info&inprop=url&piprop=thumbnail&pithumbsize=800&exintro=1&explaintext=1&exsentences=4&redirects=1&format=json&origin=*`);
+  const page = Object.values(d.query?.pages || {})[0] || {};
+  return { image: page.thumbnail?.source || '', extract: page.extract || '', wiki: page.fullurl || '' };
 }
-const commonsUrl = (file) => `https://commons.wikimedia.org/wiki/Special:FilePath/${encodeURIComponent(file)}?width=800`;
+const commonsUrl = (file) => `https://commons.wikimedia.org/wiki/Special:FilePath/${encodeURIComponent(file.replace(/^File:/, ''))}?width=800`;
+// Foto scattate in quel punto (Wikimedia Commons): utile anche per ristoranti e luoghi minori
+async function commonsNear(lat, lon, radius) {
+  const d = await getJSON(`https://commons.wikimedia.org/w/api.php?action=query&generator=geosearch&ggsnamespace=6` +
+    `&ggscoord=${lat}|${lon}&ggsradius=${radius}&ggslimit=10&prop=imageinfo&iiprop=url|mime&iiurlwidth=800&format=json&origin=*`);
+  const pages = Object.values(d.query?.pages || {}).sort((a, b) => (a.index || 0) - (b.index || 0));
+  const img = pages.map((p) => p.imageinfo?.[0]).find((ii) => ii && /jpeg|png|webp/.test(ii.mime));
+  return img ? img.thumburl || img.url : '';
+}
+// Ultimo ripiego, sempre disponibile: la mappa del punto
+function mapTile(lat, lon, z = 17) {
+  const n = 2 ** z, rad = (lat * Math.PI) / 180;
+  const x = Math.floor(((lon + 180) / 360) * n);
+  const y = Math.floor(((1 - Math.log(Math.tan(rad) + 1 / Math.cos(rad)) / Math.PI) / 2) * n);
+  return `https://tile.openstreetmap.org/${z}/${x}/${y}.png`;
+}
+const norm = (s) => s.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+const nameWords = (s) => norm(s).split(/[^a-z0-9]+/).filter((w) => w.length > 3 && !/^(della|delle|dello|degli|piazza|chiesa|basilica|via)$/.test(w));
 
 async function enrich(it, kind) {
-  const t = it.tags || {};
+  let t = it.tags || {};
   const out = {};
+  // Risultato da Photon: recupera prima i tag OSM completi
+  if (it.needTags && it.osm) {
+    try {
+      const full = await osmTags(it.osm);
+      if (full) {
+        t = full.tags; out.tags = t;
+        out.hours = fmtHours(t.opening_hours); out.price = fmtPrice(t);
+        out.website = t.website || t['contact:website'] || ''; out.phone = t.phone || t['contact:phone'] || '';
+        out.cuisine = fmtCuisine(t.cuisine);
+        if (!it.address && full.address) out.address = full.address;
+      }
+    } catch {}
+  }
+  const merge = (s) => { if (!s) return; out.image = out.image || s.image; out.extract = out.extract || s.extract; out.wiki = out.wiki || s.wiki; };
   try {
     if (t.wikipedia) {
       const [lang, ...rest] = t.wikipedia.split(':');
-      Object.assign(out, await wikiSummary(rest.length ? lang : 'it', rest.length ? rest.join(':') : lang));
+      merge(await wikiSummary(rest.length ? lang : 'it', rest.length ? rest.join(':') : lang));
     }
   } catch {}
   try {
@@ -198,29 +280,52 @@ async function enrich(it, kind) {
       const p18 = ent?.claims?.P18?.[0]?.mainsnak?.datavalue?.value;
       if (!out.image && p18) out.image = commonsUrl(p18);
       const sl = ent?.sitelinks?.itwiki || ent?.sitelinks?.enwiki;
-      if (sl && !out.extract) {
-        const s = await wikiSummary(sl.site === 'itwiki' ? 'it' : 'en', sl.title);
-        out.extract = s.extract; out.wiki = s.wiki; out.image = out.image || s.image;
-      }
+      if (sl && (!out.extract || !out.image)) merge(await wikiSummary(sl.site === 'itwiki' ? 'it' : 'en', sl.title));
       const web = ent?.claims?.P856?.[0]?.mainsnak?.datavalue?.value;
-      if (web && !it.website) out.website = web;
+      if (web && !it.website && !out.website) out.website = web;
     }
   } catch {}
   if (!out.image && t.image && /^https?:/.test(t.image)) out.image = t.image;
-  if (!out.image && t.wikimedia_commons && /^File:/.test(t.wikimedia_commons)) out.image = commonsUrl(t.wikimedia_commons.slice(5));
-  // Luoghi senza tag Wikipedia: cerca la voce piu' vicina con lo stesso nome
-  if (kind === 'places' && !out.image) {
+  if (!out.image && t.wikimedia_commons && /^File:/.test(t.wikimedia_commons)) out.image = commonsUrl(t.wikimedia_commons);
+  // Voce Wikipedia vicina con un nome simile
+  if (!out.image && it.lat != null) {
     try {
-      const g = await getJSON(`https://it.wikipedia.org/w/api.php?action=query&list=geosearch&gscoord=${it.lat}|${it.lon}&gsradius=300&gslimit=10&format=json&origin=*`);
-      const words = it.name.toLowerCase().split(/\W+/).filter((w) => w.length > 3);
-      const hit = (g.query?.geosearch || []).find((p) => words.some((w) => p.title.toLowerCase().includes(w))) ;
-      if (hit) {
-        const s = await wikiSummary('it', hit.title);
-        out.image = s.image; out.extract = out.extract || s.extract; out.wiki = out.wiki || s.wiki;
+      const g = await getJSON(`https://it.wikipedia.org/w/api.php?action=query&list=geosearch&gscoord=${it.lat}|${it.lon}&gsradius=${kind === 'food' ? 60 : 400}&gslimit=15&format=json&origin=*`);
+      const words = nameWords(it.name);
+      const hit = (g.query?.geosearch || []).find((p) => words.some((w) => norm(p.title).includes(w)));
+      if (hit) merge(await wikiSummary('it', hit.title));
+    } catch {}
+  }
+  // Ricerca testuale su Wikipedia (solo luoghi)
+  if (!out.image && kind === 'places') {
+    try {
+      const w = await wikiSuggest(it.name);
+      if (w.titles[0]) {
+        const s = await wikiSummary('it', w.titles[0]);
+        const words = nameWords(it.name);
+        if (words.some((x) => norm(w.titles[0]).includes(x))) merge(s);
       }
     } catch {}
   }
+  if (!out.image && it.lat != null) { try { out.image = await commonsNear(it.lat, it.lon, kind === 'food' ? 40 : 120); } catch {} }
+  if (!out.image && it.lat != null) { out.image = mapTile(it.lat, it.lon); out.isMap = true; }
   return out;
+}
+
+function applyEnrich(cur, extra) {
+  cur.image = extra.image || ''; cur.isMap = !!extra.isMap;
+  cur.extract = cur.extract || extra.extract || ''; cur.wiki = cur.wiki || extra.wiki || '';
+  for (const f of ['hours', 'price', 'website', 'phone', 'cuisine', 'address']) if (extra[f] && !cur[f]) cur[f] = extra[f];
+  if (extra.tags) cur.tags = extra.tags;
+  delete cur.needTags; cur.loading = false; cur.v = 2;
+}
+// Rielabora i preferiti salvati prima di questa versione o senza foto
+async function refreshMissing() {
+  for (const kind of ['places', 'food']) {
+    for (const it of lists[kind].filter((x) => (!x.image || x.isMap) && x.v !== 2 && x.lat != null)) {
+      try { applyEnrich(it, await enrich(it, kind)); save(kind); renderList(kind); } catch {}
+    }
+  }
 }
 
 function addItem(kind, c) {
@@ -232,21 +337,26 @@ function addItem(kind, c) {
     address: c.address || '', kind: c.kind || (kind === 'food' ? 'restaurant' : ''),
     hours: fmtHours(t.opening_hours), price: fmtPrice(t),
     website: t.website || t['contact:website'] || '', phone: t.phone || t['contact:phone'] || '',
-    cuisine: fmtCuisine(t.cuisine), tags: t, notes: '', done: false, loading: true, added: Date.now(),
+    cuisine: fmtCuisine(t.cuisine), tags: t, needTags: !!c.needTags, notes: '', done: false, loading: true, added: Date.now(),
   };
   list.unshift(it); save(kind); renderList(kind); refreshDestSelect();
   toast('Aggiunto: ' + it.name);
   enrich(it, kind).then((extra) => {
     const cur = lists[kind].find((x) => x.id === it.id); if (!cur) return;
-    Object.assign(cur, { image: extra.image || '', extract: extra.extract || '', wiki: extra.wiki || '', loading: false });
-    if (extra.website && !cur.website) cur.website = extra.website;
-    save(kind); renderList(kind);
+    applyEnrich(cur, extra); save(kind); renderList(kind);
   });
 }
 
 /* ---------------- Lists ---------------- */
 const emoji = (kind, it) => (kind === 'food' ? (/(cafe|bar)/.test(it.kind) ? '☕' : /ice_cream/.test(it.kind) ? '🍨' : /pizza/i.test(it.cuisine) ? '🍕' : '🍝') : '🏛️');
 let posNow = null; // ultima posizione nota
+
+// <img> con ripiego: se la foto non si carica mostra la mappa del punto, poi l'emoji
+function imgTag(it, kind) {
+  const fb = it.lat != null && !it.isMap ? mapTile(it.lat, it.lon) : '';
+  return `<img src="${esc(it.image)}" alt="" loading="lazy" referrerpolicy="no-referrer" ` +
+    `onerror="if(this.dataset.fb){this.src=this.dataset.fb;this.dataset.fb='';}else{this.replaceWith(document.createTextNode('${emoji(kind, it)}'));}" data-fb="${esc(fb)}">`;
+}
 
 function renderList(kind) {
   const box = kind === 'places' ? $('#placesList') : $('#foodList');
@@ -263,7 +373,7 @@ function renderList(kind) {
     const firstHours = it.hours ? it.hours.split('\n')[0] : '';
     return `
     <div class="item ${it.done ? 'done' : ''}" data-id="${it.id}">
-      <div class="thumb" data-open style="${it.image ? `background-image:url('${esc(it.image)}')` : ''}">${it.image ? '' : it.loading ? '<span class="spin"></span>' : emoji(kind, it)}</div>
+      <div class="thumb" data-open>${it.image ? imgTag(it, kind) : it.loading ? '<span class="spin"></span>' : emoji(kind, it)}</div>
       <div class="body">
         <div class="title" data-open>${esc(it.name)}</div>
         <div class="meta">
@@ -315,7 +425,7 @@ function openDetail(kind, it) {
   const isFood = kind === 'food';
   const body = $('#modalBody');
   body.innerHTML = `
-    <div class="hero" style="${it.image ? `background-image:url('${esc(it.image)}')` : ''}">${it.image ? '' : emoji(kind, it)}</div>
+    <div class="hero">${it.image ? imgTag(it, kind) : emoji(kind, it)}</div>
     <div class="dbody">
       <div>
         <h2>${esc(it.name)}</h2>
@@ -351,6 +461,7 @@ function openDetail(kind, it) {
       </div>` : ''}
       <div class="btns">
         <button class="btn" data-done>${it.done ? '↩️ Segna come da fare' : isFood ? '✅ Segna come provato' : '✅ Segna come visitato'}</button>
+        <button class="btn" data-photo>🖼️ Cambia foto</button>
         <button class="btn danger" data-del>🗑️ Elimina</button>
       </div>
     </div>`;
@@ -365,6 +476,10 @@ function openDetail(kind, it) {
       if (!confirm('Eliminare "' + it.name + '"?')) return;
       lists[kind] = lists[kind].filter((x) => x.id !== it.id); save(kind); renderList(kind); refreshDestSelect(); closeModal();
     } else if (e.target.closest('[data-bus]')) { closeModal(); planTo(it); }
+    else if (e.target.closest('[data-photo]')) {
+      const u = prompt('Incolla il link di una foto (es. da Google Immagini: tieni premuto sulla foto → Copia indirizzo immagine):', it.isMap ? '' : it.image || '');
+      if (u && /^https?:\/\//.test(u.trim())) { it.image = u.trim(); it.isMap = false; save(kind); renderList(kind); openDetail(kind, it); }
+    }
   };
   $('#modal').hidden = false;
   document.body.style.overflow = 'hidden';
@@ -374,7 +489,14 @@ function closeModal() { $('#modal').hidden = true; document.body.style.overflow 
 /* ---------------- Manual add / nearby food ---------------- */
 function manualFood() {
   const name = prompt('Nome del ristorante:'); if (!name || !name.trim()) return;
-  addItem('food', { name: name.trim(), tags: {}, kind: 'restaurant' });
+  const box = $('#foodResults');
+  box.innerHTML = '<div class="info"><span class="spin"></span> Cerco dove si trova…</div>';
+  smartSearch(name.trim(), 'food').then(({ res }) => {
+    const hit = res.find((r) => FOOD_TYPES.test(r.kind));
+    box.innerHTML = '';
+    addItem('food', hit ? { ...hit, name: name.trim() } : { name: name.trim(), tags: {}, kind: 'restaurant' });
+    if (!hit) toast('Non trovo la posizione: aggiunto solo il nome');
+  }).catch(() => { box.innerHTML = ''; addItem('food', { name: name.trim(), tags: {}, kind: 'restaurant' }); });
 }
 async function nearbyFood() {
   const box = $('#foodResults');
@@ -703,6 +825,7 @@ function initApp() {
   $('#importFile').addEventListener('change', (e) => { if (e.target.files[0]) importData(e.target.files[0]); e.target.value = ''; });
 
   renderList('places'); renderList('food'); refreshDestSelect();
+  refreshMissing();
   let tab = 'places'; try { tab = sessionStorage.getItem('roma.tab') || 'places'; } catch {}
   switchTab(tab);
 }
