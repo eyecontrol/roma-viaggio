@@ -13,7 +13,7 @@ const OVERPASS = [
   'https://overpass.private.coffee/api/interpreter',
 ];
 const WALK_M_PER_MIN = 75;
-const APP_VERSION = 6; // tenere allineato con version.json e con ?v= in index.html
+const APP_VERSION = 7; // tenere allineato con version.json e con ?v= in index.html
 const SUGGESTED = ['Colosseo', 'Fontana di Trevi', 'Pantheon', 'Musei Vaticani', 'Basilica di San Pietro',
   'Galleria Borghese', 'Castel Sant\'Angelo', 'Piazza Navona', 'Fori Imperiali', 'Trastevere',
   'Piazza di Spagna', 'Terme di Caracalla', 'Bocca della Verità', 'Gianicolo'];
@@ -54,29 +54,23 @@ function removeItem(kind, id) {
 }
 
 /* ---------------- Liste condivise (sincronizzazione online) ----------------
- * Le liste vivono in un documento JSON su jsonblob.com, identificato dal "codice viaggio".
- * Chi apre il link con ?viaggio=CODICE entra nella stessa lista. Ogni elemento ha un campo upd:
+ * Le liste vivono in un Firebase Realtime Database, il cui indirizzo e' scritto in sync.json:
+ * chiunque apra il link del sito usa la stessa lista. Ogni elemento ha un campo upd:
  * in caso di modifiche contemporanee vince la piu' recente; le cancellazioni restano in "deleted".
+ * Il documento e' salvato come stringa JSON per evitare i limiti di Firebase sui nomi delle chiavi.
  */
-const BLOB_API = 'https://jsonblob.com/api/jsonBlob';
+const DB_RE = /^https:\/\/[a-z0-9-]+(\.[a-z0-9-]+)*\.(firebasedatabase\.app|firebaseio\.com)$/;
 const sync = {
   id: null, timer: null, busy: false, again: false, status: 'off',
-  init() {
-    const qp = new URLSearchParams(location.search).get('viaggio');
-    if (qp && /^[\w-]{6,80}$/.test(qp)) store.set('roma.trip', qp);
-    this.id = store.get('roma.trip', null);
-    if (qp) { const u = new URL(location.href); u.searchParams.delete('viaggio'); history.replaceState(null, '', u); }
-  },
-  // La lista comune del sito e' scritta in sync.json: tutti quelli che aprono il link normale la usano.
-  // I dati gia' presenti sul telefono vengono uniti alla lista comune alla prima sincronizzazione.
+  init() { this.id = store.get('roma.db', null); },
   async discover() {
     try {
       const d = await (await fetch('sync.json?t=' + Date.now(), { cache: 'no-store' })).json();
-      if (d.id && /^[\w-]{6,80}$/.test(d.id) && d.id !== this.id) { this.id = d.id; store.set('roma.trip', d.id); }
+      const db = (d.db || '').replace(/\/+$/, '');
+      if (DB_RE.test(db) && db !== this.id) { this.id = db; store.set('roma.db', db); }
     } catch {}
   },
-  url() { return `${BLOB_API}/${this.id}`; },
-  shareLink() { return location.origin + location.pathname + '?viaggio=' + this.id; },
+  url() { return `${this.id}/roma.json`; },
   payload() {
     const clean = (arr) => arr.map((it) => { const o = { ...it }; delete o.loading; return o; });
     return { app: 'roma-in-tasca', places: clean(lists.places), food: clean(lists.food), deleted };
@@ -120,15 +114,17 @@ const sync = {
     if (this.busy) { this.again = true; return; }
     this.busy = true; this.setStatus('busy', 'Sincronizzo…');
     try {
-      const r = await fetch(this.url(), { headers: { Accept: 'application/json' }, cache: 'no-store' });
-      if (r.status === 404) throw new Error('lista condivisa non trovata');
+      const r = await fetch(this.url(), { cache: 'no-store' });
+      if (r.status === 401 || r.status === 403) throw new Error('accesso negato dal database (regole)');
       if (!r.ok) throw new Error('HTTP ' + r.status);
-      const remote = await r.json();
+      const raw = await r.json();
+      let remote = {};
+      try { remote = typeof raw === 'string' ? JSON.parse(raw) : raw || {}; } catch {}
       const changed = this.merge(remote);
       const mine = JSON.stringify(this.payload());
       const theirs = JSON.stringify({ app: 'roma-in-tasca', places: remote.places || [], food: remote.food || [], deleted: remote.deleted || {} });
       if (mine !== theirs) {
-        const w = await fetch(this.url(), { method: 'PUT', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: mine });
+        const w = await fetch(this.url(), { method: 'PUT', body: JSON.stringify(mine) });
         if (!w.ok) throw new Error('HTTP ' + w.status);
       }
       if (changed) { renderList('places'); renderList('food'); refreshDestSelect(); }
@@ -139,15 +135,6 @@ const sync = {
       this.busy = false;
       if (this.again) { this.again = false; this.soon(); }
     }
-  },
-  async create() {
-    const r = await fetch(BLOB_API, { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify(this.payload()) });
-    if (!r.ok) throw new Error('HTTP ' + r.status);
-    const loc = r.headers.get('Location') || r.headers.get('X-jsonblob') || r.headers.get('X-Jsonblob-Id') || '';
-    const id = loc.split('/').pop();
-    if (!id) throw new Error('codice non ricevuto');
-    this.id = id; store.set('roma.trip', id);
-    return id;
   },
   start() {
     setInterval(() => { if (!document.hidden) this.run(); }, 15000);
@@ -986,35 +973,13 @@ function importData(file) {
 /* ---------------- Condivisione ---------------- */
 function openShare() {
   const body = $('#modalBody');
-  const show = () => {
-    body.innerHTML = `<div class="dbody">
-      <h2>👥 Lista condivisa</h2>
-      <p>Chi apre questo link vede e modifica le stesse liste (si aggiornano ogni pochi secondi):</p>
-      <input readonly value="${esc(sync.shareLink())}" id="shareLink">
-      <div class="btns">
-        <button class="btn primary" id="shareGo">📤 Invia il link</button>
-        <button class="btn" id="shareCopy">📋 Copia</button>
-      </div>
-      <p class="muted small">Basta aprirlo una volta: poi quel telefono resta collegato anche con il link normale. Codice viaggio: <b>${esc(sync.id)}</b></p>
-    </div>`;
-    $('#shareCopy').onclick = async () => { try { await navigator.clipboard.writeText(sync.shareLink()); toast('Link copiato'); } catch { $('#shareLink').select(); } };
-    $('#shareGo').onclick = async () => {
-      if (navigator.share) { try { await navigator.share({ title: 'Roma in Tasca', text: 'Le nostre liste per Roma', url: sync.shareLink() }); } catch {} }
-      else $('#shareCopy').click();
-    };
-  };
-  if (sync.id) show();
-  else {
-    body.innerHTML = `<div class="dbody"><h2>👥 Lista condivisa</h2>
-      <p>Ora le liste sono salvate solo su questo telefono. Crea una lista condivisa: i luoghi e i ristoranti che hai già salvato vengono inclusi, poi mandi il link agli altri.</p>
-      <button class="btn primary" id="shareCreate">Crea lista condivisa</button>
-      <p class="muted small">Le liste vengono salvate su jsonblob.com: chi ha il link può vederle, quindi niente dati riservati.</p></div>`;
-    $('#shareCreate').onclick = async (e) => {
-      e.target.disabled = true; e.target.innerHTML = '<span class="spin"></span> Creo…';
-      try { await sync.create(); sync.setStatus('ok', 'Lista condivisa creata'); sync.run(); show(); }
-      catch (err) { e.target.disabled = false; e.target.textContent = 'Riprova'; toast('Non riesco a creare la lista condivisa (' + err.message + ')', 5000); }
-    };
-  }
+  body.innerHTML = sync.id ? `<div class="dbody"><h2>👥 Liste condivise</h2>
+      <p>Le liste sono condivise con tutti quelli che usano il link <b>${esc(location.origin + location.pathname)}</b>. Le modifiche arrivano agli altri in pochi secondi.</p>
+      <p class="muted small">${esc($('#syncBadge').title || '')}</p>
+      <button class="btn primary" id="syncNow">🔄 Aggiorna adesso</button></div>`
+    : `<div class="dbody"><h2>👥 Liste condivise</h2>
+      <p>La condivisione non è ancora attiva: per ora le liste sono salvate solo su questo telefono. Appena viene attivata, quello che hai già salvato si unisce alla lista comune, senza perdere nulla.</p></div>`;
+  const b = $('#syncNow'); if (b) b.onclick = () => { sync.run(); closeModal(); toast('Aggiorno le liste…'); };
   $('#modal').hidden = false; document.body.style.overflow = 'hidden';
 }
 
