@@ -13,7 +13,7 @@ const OVERPASS = [
   'https://overpass.private.coffee/api/interpreter',
 ];
 const WALK_M_PER_MIN = 75;
-const APP_VERSION = 8; // tenere allineato con version.json e con ?v= in index.html
+const APP_VERSION = 9; // tenere allineato con version.json e con ?v= in index.html
 const SUGGESTED = ['Colosseo', 'Fontana di Trevi', 'Pantheon', 'Musei Vaticani', 'Basilica di San Pietro',
   'Galleria Borghese', 'Castel Sant\'Angelo', 'Piazza Navona', 'Fori Imperiali', 'Trastevere',
   'Piazza di Spagna', 'Terme di Caracalla', 'Bocca della Verità', 'Gianicolo'];
@@ -69,9 +69,16 @@ const sync = {
       // sync.json puo' elencare piu' indirizzi possibili (la regione del database cambia il dominio): vince il primo che risponde
       const cands = [].concat(d.db || []).map((x) => String(x).replace(/\/+$/, '')).filter((x) => DB_RE.test(x));
       if (this.id && cands.includes(this.id)) return;
+      const tried = [];
       for (const c of cands) {
-        try { const r = await fetch(`${c}/roma.json`, { cache: 'no-store' }); if (r.ok) { this.id = c; store.set('roma.db', c); return; } } catch {}
+        try {
+          const r = await fetch(`${c}/roma.json`, { cache: 'no-store' });
+          // 401/403: il database esiste ma le regole bloccano l'accesso (lo segnala run())
+          if (r.ok || r.status === 401 || r.status === 403) { this.id = c; store.set('roma.db', c); return; }
+          tried.push(r.status);
+        } catch (e) { tried.push(e.message); }
       }
+      if (cands.length) this.discoverErr = 'database non raggiungibile (' + tried.join(', ') + ')';
     } catch {}
   },
   url() { return `${this.id}/roma.json`; },
@@ -119,7 +126,7 @@ const sync = {
     this.busy = true; this.setStatus('busy', 'Sincronizzo…');
     try {
       const r = await fetch(this.url(), { cache: 'no-store' });
-      if (r.status === 401 || r.status === 403) throw new Error('accesso negato dal database (regole)');
+      if (r.status === 401 || r.status === 403) throw new Error('accesso negato: in Firebase apri Regole e metti .read e .write a true');
       if (!r.ok) throw new Error('HTTP ' + r.status);
       const raw = await r.json();
       let remote = {};
@@ -144,7 +151,8 @@ const sync = {
     setInterval(() => { if (!document.hidden) this.run(); }, 15000);
     document.addEventListener('visibilitychange', () => { if (!document.hidden) this.run(); });
     window.addEventListener('online', () => this.run());
-    this.setStatus(this.id ? 'busy' : 'off', this.id ? '' : 'Liste solo su questo telefono');
+    if (!this.id && this.discoverErr) this.setStatus('err', 'Sincronizzazione non riuscita: ' + this.discoverErr);
+    else this.setStatus(this.id ? 'busy' : 'off', this.id ? '' : 'Liste solo su questo telefono');
     this.run();
   },
 };
@@ -1044,7 +1052,7 @@ function initApp() {
 
   renderList('places'); renderList('food'); refreshDestSelect();
   $('#shareBtn').addEventListener('click', openShare);
-  $('#syncBadge').addEventListener('click', () => { if (!sync.id) return openShare(); sync.run(); toast($('#syncBadge').title || 'Sincronizzo…'); });
+  $('#syncBadge').addEventListener('click', () => { if (!sync.id) { if (sync.status === 'err') return toast($('#syncBadge').title, 6000); return openShare(); } sync.run(); toast($('#syncBadge').title || 'Sincronizzo…'); });
   sync.discover().then(() => { sync.start(); refreshMissing(); });
   let tab = 'places'; try { tab = sessionStorage.getItem('roma.tab') || 'places'; } catch {}
   switchTab(tab);
