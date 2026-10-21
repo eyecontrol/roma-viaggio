@@ -123,7 +123,7 @@ main { max-width: 760px; margin: 0 auto; padding: 16px 16px 100px; }
 .list { display: grid; gap: 12px; }
 .empty { text-align: center; color: var(--muted); padding: 28px 12px; border: 2px dashed var(--line); border-radius: var(--radius); }
 
-.item { background: var(--card); border-radius: var(--radius); box-shadow: var(--shadow); overflow: hidden;
+.item { position: relative; background: var(--card); border-radius: var(--radius); box-shadow: var(--shadow); overflow: hidden;
   display: grid; grid-template-columns: 112px 1fr; border: 1px solid var(--line); }
 .item .thumb { background: var(--chip); min-height: 112px; display: grid; place-items: center; font-size: 2.2rem; cursor: pointer; overflow: hidden; position: relative; }
 .item .thumb img, .hero img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
@@ -202,3 +202,12 @@ main { max-width: 760px; margin: 0 auto; padding: 16px 16px 100px; }
 .bookbox textarea { background: var(--card); min-height: 56px; }
 .bookrow { display: grid; grid-template-columns: 1.4fr 1fr; gap: 8px; }
 .bookrow input { padding: 9px 10px; }
+
+.postit { position: absolute; top: 8px; right: 8px; z-index: 2; width: 34px; height: 34px; border: 0; cursor: pointer;
+  background: #ffe27a; color: #6b5300; font-size: 1rem; border-radius: 3px 3px 10px 3px; transform: rotate(4deg);
+  box-shadow: 0 2px 6px rgba(0,0,0,.18); display: grid; place-items: center; opacity: .75; }
+.postit.has { background: #ffd23f; opacity: 1; }
+.item .body { padding-right: 46px; }
+.bookbox { background: #fff6cc; scroll-margin-top: 12px; }
+.bookbox label { color: #6b5300; }
+@media (prefers-color-scheme: dark) { .bookbox { background: #3a3218; } .bookbox label { color: #f3d77a; } }

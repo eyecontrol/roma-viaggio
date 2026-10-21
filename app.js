@@ -398,6 +398,7 @@ function renderList(kind) {
     return `
     <div class="item ${it.done ? 'done' : ''}" data-id="${it.id}">
       <div class="thumb" data-open>${it.image ? imgTag(it, kind) : it.loading ? '<span class="spin"></span>' : emoji(kind, it)}</div>
+      <button class="postit ${it.bookNote || it.notes || it.bookDate ? 'has' : ''}" data-note title="Nota e prenotazione" aria-label="Nota e prenotazione">${it.bookNote || it.notes || it.bookDate ? '📝' : '✎'}</button>
       <div class="body">
         <div class="title" data-open>${esc(it.name)}</div>
         <div class="meta">
@@ -441,6 +442,7 @@ function onListClick(kind) {
     const card = e.target.closest('.item'); if (!card) return;
     const it = lists[kind].find((x) => x.id === card.dataset.id); if (!it) return;
     if (e.target.closest('[data-bus]')) { planTo(it); return; }
+    if (e.target.closest('[data-note]')) { openDetail(kind, it, true); return; }
     if (e.target.closest('[data-open]')) openDetail(kind, it);
   };
 }
@@ -481,7 +483,7 @@ function downloadIcs(kind, it) {
 }
 
 /* ---------------- Detail ---------------- */
-function openDetail(kind, it) {
+function openDetail(kind, it, toNote = false) {
   const isFood = kind === 'food';
   const body = $('#modalBody');
   body.innerHTML = `
@@ -563,6 +565,10 @@ function openDetail(kind, it) {
   };
   $('#modal').hidden = false;
   document.body.style.overflow = 'hidden';
+  if (toNote) {
+    const box = $('.bookbox', body);
+    setTimeout(() => { box.scrollIntoView({ block: 'start', behavior: 'smooth' }); $('[data-f=bookNote]', box).focus({ preventScroll: true }); }, 60);
+  }
 }
 function closeModal() { $('#modal').hidden = true; document.body.style.overflow = ''; }
 
