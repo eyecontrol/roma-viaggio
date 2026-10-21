@@ -11,7 +11,7 @@
   <link rel="icon" href="icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="icon.svg">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
-  <link rel="stylesheet" href="style.css?v=5">
+  <link rel="stylesheet" href="style.css?v=6">
 </head>
 <body>
 
@@ -31,9 +31,11 @@
     <header class="top">
       <h1>🏛️ Roma in Tasca</h1>
       <div class="top-actions">
+        <button class="icon-btn sync" id="syncBadge" title="" aria-label="Stato sincronizzazione" hidden>📱</button>
         <button class="icon-btn" id="menuBtn" title="Menu" aria-label="Menu">⋯</button>
       </div>
       <div id="menu" class="menu" hidden>
+        <button data-act="share">👥 Condividi le liste</button>
         <button data-act="export">⬇️ Esporta le mie liste</button>
         <button data-act="import">⬆️ Importa liste</button>
         <button data-act="logout">🚪 Esci</button>
@@ -42,6 +44,10 @@
     </header>
 
     <main>
+      <div class="sharebar" id="shareBar" hidden>
+        <span>📱 Le liste sono solo su questo telefono.</span>
+        <button class="btn small primary" id="shareBtn">👥 Condividi con gli altri</button>
+      </div>
       <!-- LUOGHI -->
       <section id="tab-places" class="tab active">
         <form class="search" data-kind="places">
@@ -132,6 +138,6 @@
   <div id="toast" class="toast" hidden></div>
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
-  <script src="app.js?v=5"></script>
+  <script src="app.js?v=6"></script>
 </body>
 </html>

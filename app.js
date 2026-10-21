@@ -13,7 +13,7 @@ const OVERPASS = [
   'https://overpass.private.coffee/api/interpreter',
 ];
 const WALK_M_PER_MIN = 75;
-const APP_VERSION = 5; // tenere allineato con version.json e con ?v= in index.html
+const APP_VERSION = 6; // tenere allineato con version.json e con ?v= in index.html
 const SUGGESTED = ['Colosseo', 'Fontana di Trevi', 'Pantheon', 'Musei Vaticani', 'Basilica di San Pietro',
   'Galleria Borghese', 'Castel Sant\'Angelo', 'Piazza Navona', 'Fori Imperiali', 'Trastevere',
   'Piazza di Spagna', 'Terme di Caracalla', 'Bocca della Verità', 'Gianicolo'];
@@ -32,7 +32,132 @@ const lists = {
   food: store.get('roma.food', []),
 };
 const filters = { places: 'todo', food: 'todo' };
-function save(kind) { store.set(kind === 'places' ? 'roma.places' : 'roma.food', lists[kind]); }
+const deleted = store.get('roma.deleted', {}); // id -> momento della cancellazione (per la sincronizzazione)
+const TRANSIENT = new Set(['loading', 'upd']);
+const itemSig = (it) => JSON.stringify(it, (k, v) => (TRANSIENT.has(k) ? undefined : v));
+const sigs = new Map(); // ultima versione salvata di ogni elemento
+for (const k of ['places', 'food']) lists[k].forEach((it) => sigs.set(it.id, itemSig(it)));
+function save(kind) {
+  // segna come modificati gli elementi cambiati, cosi' la sincronizzazione sa quale versione vince
+  const now = Date.now();
+  for (const it of lists[kind]) {
+    const sg = itemSig(it);
+    if (sigs.get(it.id) !== sg) { sigs.set(it.id, sg); it.upd = now; }
+  }
+  store.set(kind === 'places' ? 'roma.places' : 'roma.food', lists[kind]);
+  sync.soon();
+}
+function removeItem(kind, id) {
+  lists[kind] = lists[kind].filter((x) => x.id !== id);
+  deleted[id] = Date.now(); store.set('roma.deleted', deleted);
+  save(kind);
+}
+
+/* ---------------- Liste condivise (sincronizzazione online) ----------------
+ * Le liste vivono in un documento JSON su jsonblob.com, identificato dal "codice viaggio".
+ * Chi apre il link con ?viaggio=CODICE entra nella stessa lista. Ogni elemento ha un campo upd:
+ * in caso di modifiche contemporanee vince la piu' recente; le cancellazioni restano in "deleted".
+ */
+const BLOB_API = 'https://jsonblob.com/api/jsonBlob';
+const sync = {
+  id: null, timer: null, busy: false, again: false, status: 'off',
+  init() {
+    const qp = new URLSearchParams(location.search).get('viaggio');
+    if (qp && /^[\w-]{6,80}$/.test(qp)) store.set('roma.trip', qp);
+    this.id = store.get('roma.trip', null);
+    if (qp) { const u = new URL(location.href); u.searchParams.delete('viaggio'); history.replaceState(null, '', u); }
+  },
+  // La lista comune del sito e' scritta in sync.json: tutti quelli che aprono il link normale la usano.
+  // I dati gia' presenti sul telefono vengono uniti alla lista comune alla prima sincronizzazione.
+  async discover() {
+    try {
+      const d = await (await fetch('sync.json?t=' + Date.now(), { cache: 'no-store' })).json();
+      if (d.id && /^[\w-]{6,80}$/.test(d.id) && d.id !== this.id) { this.id = d.id; store.set('roma.trip', d.id); }
+    } catch {}
+  },
+  url() { return `${BLOB_API}/${this.id}`; },
+  shareLink() { return location.origin + location.pathname + '?viaggio=' + this.id; },
+  payload() {
+    const clean = (arr) => arr.map((it) => { const o = { ...it }; delete o.loading; return o; });
+    return { app: 'roma-in-tasca', places: clean(lists.places), food: clean(lists.food), deleted };
+  },
+  soon() { if (!this.id) return; clearTimeout(this.timer); this.timer = setTimeout(() => this.run(), 1200); },
+  setStatus(st, msg) {
+    this.status = st;
+    const el = $('#syncBadge'); if (el) {
+      el.hidden = false;
+      el.textContent = st === 'ok' ? '☁️' : st === 'busy' ? '🔄' : st === 'err' ? '⚠️' : '📱';
+      el.title = msg || '';
+    }
+    const bar = $('#shareBar'); if (bar) bar.hidden = !!this.id;
+  },
+  // unisce il documento remoto nelle liste locali, modificando gli oggetti esistenti (le schede aperte restano valide)
+  merge(remote) {
+    let changedLocal = false;
+    for (const [id, ts] of Object.entries(remote.deleted || {})) if (!deleted[id] || deleted[id] < ts) deleted[id] = ts;
+    for (const kind of ['places', 'food']) {
+      const byId = new Map(lists[kind].map((x) => [x.id, x]));
+      for (const r of remote[kind] || []) {
+        if (!r || !r.id) continue;
+        const loc = byId.get(r.id);
+        if (!loc) { const o = { ...r, loading: false }; lists[kind].push(o); byId.set(o.id, o); sigs.set(o.id, itemSig(o)); changedLocal = true; }
+        else if ((r.upd || 0) > (loc.upd || 0)) {
+          for (const k of Object.keys(loc)) if (!(k in r) && k !== 'loading') delete loc[k];
+          Object.assign(loc, r, { loading: false }); sigs.set(loc.id, itemSig(loc)); changedLocal = true;
+        }
+      }
+      const before = lists[kind].length;
+      lists[kind] = lists[kind].filter((x) => !(deleted[x.id] && deleted[x.id] >= (x.upd || 0)));
+      if (lists[kind].length !== before) changedLocal = true;
+      lists[kind].sort((a, b) => (b.added || 0) - (a.added || 0));
+      store.set(kind === 'places' ? 'roma.places' : 'roma.food', lists[kind]);
+    }
+    store.set('roma.deleted', deleted);
+    return changedLocal;
+  },
+  async run() {
+    if (!this.id) return;
+    if (this.busy) { this.again = true; return; }
+    this.busy = true; this.setStatus('busy', 'Sincronizzo…');
+    try {
+      const r = await fetch(this.url(), { headers: { Accept: 'application/json' }, cache: 'no-store' });
+      if (r.status === 404) throw new Error('lista condivisa non trovata');
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const remote = await r.json();
+      const changed = this.merge(remote);
+      const mine = JSON.stringify(this.payload());
+      const theirs = JSON.stringify({ app: 'roma-in-tasca', places: remote.places || [], food: remote.food || [], deleted: remote.deleted || {} });
+      if (mine !== theirs) {
+        const w = await fetch(this.url(), { method: 'PUT', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: mine });
+        if (!w.ok) throw new Error('HTTP ' + w.status);
+      }
+      if (changed) { renderList('places'); renderList('food'); refreshDestSelect(); }
+      this.setStatus('ok', 'Liste condivise aggiornate alle ' + new Date().toLocaleTimeString('it-IT', { hour: '2-digit', minute: '2-digit' }));
+    } catch (e) {
+      this.setStatus('err', 'Sincronizzazione non riuscita: ' + e.message);
+    } finally {
+      this.busy = false;
+      if (this.again) { this.again = false; this.soon(); }
+    }
+  },
+  async create() {
+    const r = await fetch(BLOB_API, { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify(this.payload()) });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const loc = r.headers.get('Location') || r.headers.get('X-jsonblob') || r.headers.get('X-Jsonblob-Id') || '';
+    const id = loc.split('/').pop();
+    if (!id) throw new Error('codice non ricevuto');
+    this.id = id; store.set('roma.trip', id);
+    return id;
+  },
+  start() {
+    setInterval(() => { if (!document.hidden) this.run(); }, 15000);
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) this.run(); });
+    window.addEventListener('online', () => this.run());
+    this.setStatus(this.id ? 'busy' : 'off', this.id ? '' : 'Liste solo su questo telefono');
+    this.run();
+  },
+};
+sync.init();
 
 /* ---------------- Utils ---------------- */
 function toast(msg, ms = 2600) {
@@ -550,7 +675,7 @@ function openDetail(kind, it, toNote = false) {
     if (e.target.closest('[data-done]')) { it.done = !it.done; save(kind); renderList(kind); closeModal(); toast(it.done ? 'Fatto! ✓' : 'Rimesso in lista'); }
     else if (e.target.closest('[data-del]')) {
       if (!confirm('Eliminare "' + it.name + '"?')) return;
-      lists[kind] = lists[kind].filter((x) => x.id !== it.id); save(kind); renderList(kind); refreshDestSelect(); closeModal();
+      removeItem(kind, it.id); renderList(kind); refreshDestSelect(); closeModal();
     } else if (e.target.closest('[data-bus]')) { closeModal(); planTo(it); }
     else if (e.target.closest('[data-ics]')) {
       if (!it.bookDate) { toast('Scegli prima il giorno'); return; }
@@ -858,6 +983,41 @@ function importData(file) {
   r.readAsText(file);
 }
 
+/* ---------------- Condivisione ---------------- */
+function openShare() {
+  const body = $('#modalBody');
+  const show = () => {
+    body.innerHTML = `<div class="dbody">
+      <h2>👥 Lista condivisa</h2>
+      <p>Chi apre questo link vede e modifica le stesse liste (si aggiornano ogni pochi secondi):</p>
+      <input readonly value="${esc(sync.shareLink())}" id="shareLink">
+      <div class="btns">
+        <button class="btn primary" id="shareGo">📤 Invia il link</button>
+        <button class="btn" id="shareCopy">📋 Copia</button>
+      </div>
+      <p class="muted small">Basta aprirlo una volta: poi quel telefono resta collegato anche con il link normale. Codice viaggio: <b>${esc(sync.id)}</b></p>
+    </div>`;
+    $('#shareCopy').onclick = async () => { try { await navigator.clipboard.writeText(sync.shareLink()); toast('Link copiato'); } catch { $('#shareLink').select(); } };
+    $('#shareGo').onclick = async () => {
+      if (navigator.share) { try { await navigator.share({ title: 'Roma in Tasca', text: 'Le nostre liste per Roma', url: sync.shareLink() }); } catch {} }
+      else $('#shareCopy').click();
+    };
+  };
+  if (sync.id) show();
+  else {
+    body.innerHTML = `<div class="dbody"><h2>👥 Lista condivisa</h2>
+      <p>Ora le liste sono salvate solo su questo telefono. Crea una lista condivisa: i luoghi e i ristoranti che hai già salvato vengono inclusi, poi mandi il link agli altri.</p>
+      <button class="btn primary" id="shareCreate">Crea lista condivisa</button>
+      <p class="muted small">Le liste vengono salvate su jsonblob.com: chi ha il link può vederle, quindi niente dati riservati.</p></div>`;
+    $('#shareCreate').onclick = async (e) => {
+      e.target.disabled = true; e.target.innerHTML = '<span class="spin"></span> Creo…';
+      try { await sync.create(); sync.setStatus('ok', 'Lista condivisa creata'); sync.run(); show(); }
+      catch (err) { e.target.disabled = false; e.target.textContent = 'Riprova'; toast('Non riesco a creare la lista condivisa (' + err.message + ')', 5000); }
+    };
+  }
+  $('#modal').hidden = false; document.body.style.overflow = 'hidden';
+}
+
 function initApp() {
   if (initApp.done) return; initApp.done = true;
   // le ricerche non completate restano marcate in caricamento: ripulisci
@@ -906,6 +1066,7 @@ function initApp() {
   document.addEventListener('click', () => (menu.hidden = true));
   menu.addEventListener('click', (e) => {
     const act = e.target.closest('button')?.dataset.act;
+    if (act === 'share') openShare();
     if (act === 'export') exportData();
     if (act === 'import') $('#importFile').click();
     if (act === 'logout') { localStorage.removeItem('roma.auth'); location.reload(); }
@@ -913,7 +1074,9 @@ function initApp() {
   $('#importFile').addEventListener('change', (e) => { if (e.target.files[0]) importData(e.target.files[0]); e.target.value = ''; });
 
   renderList('places'); renderList('food'); refreshDestSelect();
-  refreshMissing();
+  $('#shareBtn').addEventListener('click', openShare);
+  $('#syncBadge').addEventListener('click', () => { if (!sync.id) return openShare(); sync.run(); toast($('#syncBadge').title || 'Sincronizzo…'); });
+  sync.discover().then(() => { sync.start(); refreshMissing(); });
   let tab = 'places'; try { tab = sessionStorage.getItem('roma.tab') || 'places'; } catch {}
   switchTab(tab);
 }
