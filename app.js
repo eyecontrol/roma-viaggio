@@ -13,7 +13,7 @@ const OVERPASS = [
   'https://overpass.private.coffee/api/interpreter',
 ];
 const WALK_M_PER_MIN = 75;
-const APP_VERSION = 9; // tenere allineato con version.json e con ?v= in index.html
+const APP_VERSION = 10; // tenere allineato con version.json e con ?v= in index.html
 const SUGGESTED = ['Colosseo', 'Fontana di Trevi', 'Pantheon', 'Musei Vaticani', 'Basilica di San Pietro',
   'Galleria Borghese', 'Castel Sant\'Angelo', 'Piazza Navona', 'Fori Imperiali', 'Trastevere',
   'Piazza di Spagna', 'Terme di Caracalla', 'Bocca della Verità', 'Gianicolo'];
@@ -127,7 +127,7 @@ const sync = {
     try {
       const r = await fetch(this.url(), { cache: 'no-store' });
       if (r.status === 401 || r.status === 403) throw new Error('accesso negato: in Firebase apri Regole e metti .read e .write a true');
-      if (!r.ok) throw new Error('HTTP ' + r.status);
+      if (!r.ok) throw new Error('HTTP ' + r.status + ' ' + (await r.text().catch(() => '')).slice(0, 160));
       const raw = await r.json();
       let remote = {};
       try { remote = typeof raw === 'string' ? JSON.parse(raw) : raw || {}; } catch {}
@@ -141,7 +141,7 @@ const sync = {
       if (changed) { renderList('places'); renderList('food'); refreshDestSelect(); }
       this.setStatus('ok', 'Liste condivise aggiornate alle ' + new Date().toLocaleTimeString('it-IT', { hour: '2-digit', minute: '2-digit' }));
     } catch (e) {
-      this.setStatus('err', 'Sincronizzazione non riuscita: ' + e.message);
+      this.setStatus('err', 'Sincronizzazione non riuscita: ' + e.message + ' [' + this.id.replace('https://', '') + ']');
     } finally {
       this.busy = false;
       if (this.again) { this.again = false; this.soon(); }
@@ -1052,7 +1052,12 @@ function initApp() {
 
   renderList('places'); renderList('food'); refreshDestSelect();
   $('#shareBtn').addEventListener('click', openShare);
-  $('#syncBadge').addEventListener('click', () => { if (!sync.id) { if (sync.status === 'err') return toast($('#syncBadge').title, 6000); return openShare(); } sync.run(); toast($('#syncBadge').title || 'Sincronizzo…'); });
+  $('#syncBadge').addEventListener('click', () => {
+    const msg = $('#syncBadge').title;
+    if (sync.status === 'err') { toast(msg, 9000); if (sync.id) sync.run(); return; }
+    if (!sync.id) return openShare();
+    toast(msg || 'Liste condivise'); sync.run();
+  });
   sync.discover().then(() => { sync.start(); refreshMissing(); });
   let tab = 'places'; try { tab = sessionStorage.getItem('roma.tab') || 'places'; } catch {}
   switchTab(tab);
