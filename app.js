@@ -13,6 +13,7 @@ const OVERPASS = [
   'https://overpass.private.coffee/api/interpreter',
 ];
 const WALK_M_PER_MIN = 75;
+const APP_VERSION = 5; // tenere allineato con version.json e con ?v= in index.html
 const SUGGESTED = ['Colosseo', 'Fontana di Trevi', 'Pantheon', 'Musei Vaticani', 'Basilica di San Pietro',
   'Galleria Borghese', 'Castel Sant\'Angelo', 'Piazza Navona', 'Fori Imperiali', 'Trastevere',
   'Piazza di Spagna', 'Terme di Caracalla', 'Bocca della Verità', 'Gianicolo'];
@@ -398,7 +399,7 @@ function renderList(kind) {
     return `
     <div class="item ${it.done ? 'done' : ''}" data-id="${it.id}">
       <div class="thumb" data-open>${it.image ? imgTag(it, kind) : it.loading ? '<span class="spin"></span>' : emoji(kind, it)}</div>
-      <button class="postit ${it.bookNote || it.notes || it.bookDate ? 'has' : ''}" data-note title="Nota e prenotazione" aria-label="Nota e prenotazione">${it.bookNote || it.notes || it.bookDate ? '📝' : '✎'}</button>
+      <button class="postit ${it.bookNote || it.notes || it.bookDate ? 'has' : ''}" data-note title="Nota e prenotazione" aria-label="Nota e prenotazione">📝</button>
       <div class="body">
         <div class="title" data-open>${esc(it.name)}</div>
         <div class="meta">
@@ -406,7 +407,8 @@ function renderList(kind) {
           ${it.cuisine ? `<span>🍴 ${esc(it.cuisine)}</span>` : ''}
           ${d ? `<span>📍 ${d}</span>` : ''}
         </div>
-        ${it.bookDate ? `<div class="book ${bookKey(it) < nowKey() ? 'past' : ''}">📅 ${esc(fmtBook(it))}${it.bookNote ? ` · ${esc(it.bookNote.split('\n')[0])}` : ''}</div>` : ''}
+        ${it.bookDate ? `<div class="book ${bookKey(it) < nowKey() ? 'past' : ''}">📅 ${esc(fmtBook(it))}</div>` : ''}
+        ${it.bookNote || it.notes ? `<div class="note-line" data-note>📝 ${esc([it.bookNote, it.notes].filter(Boolean).join(' · '))}</div>` : ''}
         <div class="meta">
           ${firstHours ? `<span>🕒 ${esc(firstHours)}${it.hours.includes('\n') ? '…' : ''}</span>` : ''}
           ${it.price ? `<span>💶 ${esc(it.price)}</span>` : ''}
@@ -915,5 +917,18 @@ function initApp() {
   let tab = 'places'; try { tab = sessionStorage.getItem('roma.tab') || 'places'; } catch {}
   switchTab(tab);
 }
+
+// Se il browser ha in memoria una versione vecchia, ricarica quella nuova
+async function checkUpdate() {
+  try {
+    const d = await (await fetch('version.json?t=' + Date.now(), { cache: 'no-store' })).json();
+    if (d.v > APP_VERSION && !sessionStorage.getItem('roma.upd' + d.v)) {
+      sessionStorage.setItem('roma.upd' + d.v, '1');
+      location.replace(location.pathname + '?v=' + d.v);
+    }
+  } catch {}
+}
+checkUpdate();
+document.addEventListener('visibilitychange', () => { if (!document.hidden) checkUpdate(); });
 
 initLogin();
