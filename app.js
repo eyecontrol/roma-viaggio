@@ -385,6 +385,8 @@ function renderList(kind) {
   const f = filters[kind];
   if (f === 'map') return renderListMap(kind, box);
   const items = lists[kind].filter((x) => (f === 'done' ? x.done : !x.done));
+  // prima gli appuntamenti fissati, in ordine di data
+  if (f === 'todo') items.sort((a, b) => (a.bookDate ? 0 : 1) - (b.bookDate ? 0 : 1) || (bookKey(a) < bookKey(b) ? -1 : bookKey(a) > bookKey(b) ? 1 : 0));
   if (!items.length) {
     box.innerHTML = `<div class="empty">${f === 'done' ? 'Ancora niente qui.' :
       kind === 'places' ? 'Cerca un luogo qui sopra e aggiungilo alla lista.' : 'Cerca un ristorante o trova quelli vicini a te.'}</div>`;
@@ -403,6 +405,7 @@ function renderList(kind) {
           ${it.cuisine ? `<span>🍴 ${esc(it.cuisine)}</span>` : ''}
           ${d ? `<span>📍 ${d}</span>` : ''}
         </div>
+        ${it.bookDate ? `<div class="book ${bookKey(it) < nowKey() ? 'past' : ''}">📅 ${esc(fmtBook(it))}${it.bookNote ? ` · ${esc(it.bookNote.split('\n')[0])}` : ''}</div>` : ''}
         <div class="meta">
           ${firstHours ? `<span>🕒 ${esc(firstHours)}${it.hours.includes('\n') ? '…' : ''}</span>` : ''}
           ${it.price ? `<span>💶 ${esc(it.price)}</span>` : ''}
@@ -442,6 +445,41 @@ function onListClick(kind) {
   };
 }
 
+/* ---------------- Prenotazioni ---------------- */
+const bookKey = (it) => (it.bookDate || '9999-12-31') + 'T' + (it.bookTime || '00:00');
+const nowKey = () => { const d = new Date(), p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`; };
+function fmtBook(it) {
+  const [y, m, d] = it.bookDate.split('-').map(Number);
+  const s = new Date(y, m - 1, d).toLocaleDateString('it-IT', { weekday: 'short', day: 'numeric', month: 'short' });
+  return s + (it.bookTime ? ', ore ' + it.bookTime : '');
+}
+function downloadIcs(kind, it) {
+  const d = it.bookDate.replace(/-/g, ''), t = (it.bookTime || '').replace(':', '');
+  const icsText = (x) => String(x || '').replace(/\\/g, '\\\\').replace(/[,;]/g, (c) => '\\' + c).replace(/\n/g, '\\n');
+  let start, end;
+  if (t) {
+    const [hh, mm] = it.bookTime.split(':').map(Number);
+    const e = new Date(2000, 0, 1, hh + 2, mm), p = (n) => String(n).padStart(2, '0');
+    start = `DTSTART;TZID=Europe/Rome:${d}T${t}00`;
+    end = `DTEND;TZID=Europe/Rome:${d}T${hh + 2 >= 24 ? '2359' : p(e.getHours()) + p(e.getMinutes())}00`;
+  } else {
+    const n = new Date(it.bookDate + 'T12:00:00'); n.setDate(n.getDate() + 1);
+    start = `DTSTART;VALUE=DATE:${d}`; end = `DTEND;VALUE=DATE:${n.toISOString().slice(0, 10).replace(/-/g, '')}`;
+  }
+  const ics = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Roma in Tasca//IT', 'BEGIN:VEVENT',
+    `UID:${it.id}-${d}@roma-in-tasca`, `DTSTAMP:${new Date().toISOString().replace(/[-:]/g, '').slice(0, 15)}Z`, start, end,
+    `SUMMARY:${icsText((kind === 'food' ? '🍝 ' : '🏛️ ') + it.name)}`,
+    `DESCRIPTION:${icsText([it.bookNote, it.notes].filter(Boolean).join('\n'))}`,
+    `LOCATION:${icsText([it.name, it.address, 'Roma'].filter(Boolean).join(', '))}`,
+    ...(it.lat != null ? [`GEO:${it.lat};${it.lon}`] : []),
+    'END:VEVENT', 'END:VCALENDAR'].join('\r\n');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([ics], { type: 'text/calendar' }));
+  a.download = (it.name.replace(/[^\w\s-]/g, '').trim().replace(/\s+/g, '-') || 'prenotazione') + '.ics';
+  a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 3000);
+}
+
 /* ---------------- Detail ---------------- */
 function openDetail(kind, it) {
   const isFood = kind === 'food';
@@ -472,6 +510,18 @@ function openDetail(kind, it) {
         <a class="btn small" href="${googleInfo(it, isFood ? 'orari menu prezzi' : 'orari biglietti prezzi')}" target="_blank" rel="noopener">🔎 Cerca orari e prezzi aggiornati</a>
         <a class="btn small" href="${gmapsPlace(it)}" target="_blank" rel="noopener">⭐ Recensioni su Maps</a>
       </div>
+      <div class="bookbox">
+        <label>📅 ${isFood ? 'Prenotazione' : 'Quando ci vado / prenotazione'}</label>
+        <div class="bookrow">
+          <input type="date" data-f="bookDate" value="${esc(it.bookDate || '')}" aria-label="Giorno">
+          <input type="time" data-f="bookTime" value="${esc(it.bookTime || '')}" aria-label="Orario">
+        </div>
+        <textarea data-f="bookNote" placeholder="${isFood ? 'Es. prenotato a nome Nikola, 4 persone, tavolo fuori' : 'Es. biglietti presi online, codice ABC123, ingresso dalla porta nord'}">${esc(it.bookNote || '')}</textarea>
+        <div class="btns">
+          <button class="btn small" data-ics>📆 Aggiungi al calendario</button>
+          <button class="btn small" data-unbook>✖️ Cancella data</button>
+        </div>
+      </div>
       <div class="edit-row">
         <label>📝 Note</label>
         <textarea data-f="notes" placeholder="Es. prenotare, chiuso il lunedì, da vedere al tramonto…">${esc(it.notes)}</textarea>
@@ -498,7 +548,12 @@ function openDetail(kind, it) {
       if (!confirm('Eliminare "' + it.name + '"?')) return;
       lists[kind] = lists[kind].filter((x) => x.id !== it.id); save(kind); renderList(kind); refreshDestSelect(); closeModal();
     } else if (e.target.closest('[data-bus]')) { closeModal(); planTo(it); }
-    else if (e.target.closest('[data-photo]')) {
+    else if (e.target.closest('[data-ics]')) {
+      if (!it.bookDate) { toast('Scegli prima il giorno'); return; }
+      downloadIcs(kind, it);
+    } else if (e.target.closest('[data-unbook]')) {
+      it.bookDate = ''; it.bookTime = ''; save(kind); renderList(kind); openDetail(kind, it);
+    } else if (e.target.closest('[data-photo]')) {
       const u = prompt('Incolla il link di una foto (es. da Google Immagini: tieni premuto sulla foto → Copia indirizzo immagine). Lascia vuoto per tornare alla foto automatica:', it.customPhoto ? it.image : '');
       if (u === null) return;
       if (u.trim() && /^https?:\/\//.test(u.trim())) { it.image = u.trim(); it.customPhoto = true; }
