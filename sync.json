@@ -1,0 +1,7 @@
+{
+  "db": [
+    "https://roma-viaggio-default-rtdb.europe-west1.firebasedatabase.app",
+    "https://roma-viaggio-default-rtdb.firebaseio.com",
+    "https://roma-viaggio-default-rtdb.asia-southeast1.firebasedatabase.app"
+  ]
+}

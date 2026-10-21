@@ -13,7 +13,7 @@ const OVERPASS = [
   'https://overpass.private.coffee/api/interpreter',
 ];
 const WALK_M_PER_MIN = 75;
-const APP_VERSION = 7; // tenere allineato con version.json e con ?v= in index.html
+const APP_VERSION = 8; // tenere allineato con version.json e con ?v= in index.html
 const SUGGESTED = ['Colosseo', 'Fontana di Trevi', 'Pantheon', 'Musei Vaticani', 'Basilica di San Pietro',
   'Galleria Borghese', 'Castel Sant\'Angelo', 'Piazza Navona', 'Fori Imperiali', 'Trastevere',
   'Piazza di Spagna', 'Terme di Caracalla', 'Bocca della Verità', 'Gianicolo'];
@@ -66,8 +66,12 @@ const sync = {
   async discover() {
     try {
       const d = await (await fetch('sync.json?t=' + Date.now(), { cache: 'no-store' })).json();
-      const db = (d.db || '').replace(/\/+$/, '');
-      if (DB_RE.test(db) && db !== this.id) { this.id = db; store.set('roma.db', db); }
+      // sync.json puo' elencare piu' indirizzi possibili (la regione del database cambia il dominio): vince il primo che risponde
+      const cands = [].concat(d.db || []).map((x) => String(x).replace(/\/+$/, '')).filter((x) => DB_RE.test(x));
+      if (this.id && cands.includes(this.id)) return;
+      for (const c of cands) {
+        try { const r = await fetch(`${c}/roma.json`, { cache: 'no-store' }); if (r.ok) { this.id = c; store.set('roma.db', c); return; } } catch {}
+      }
     } catch {}
   },
   url() { return `${this.id}/roma.json`; },
