@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Roma in Tasca</title>
+  <meta name="description" content="Luoghi da visitare, ristoranti e bus/tram per un viaggio a Roma">
+  <meta name="theme-color" content="#a63d24">
+  <link rel="manifest" href="manifest.json">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icon.svg">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- Login -->
+  <div id="login" class="login">
+    <form id="loginForm" class="login-card">
+      <div class="logo">🏛️</div>
+      <h1>Roma in Tasca</h1>
+      <p class="muted">Inserisci la password per entrare</p>
+      <input id="pwd" type="password" placeholder="Password" autocomplete="current-password" required>
+      <button class="btn primary" type="submit">Entra</button>
+      <p id="loginErr" class="err" hidden>Password errata</p>
+    </form>
+  </div>
+
+  <div id="app" hidden>
+    <header class="top">
+      <h1>🏛️ Roma in Tasca</h1>
+      <div class="top-actions">
+        <button class="icon-btn" id="menuBtn" title="Menu" aria-label="Menu">⋯</button>
+      </div>
+      <div id="menu" class="menu" hidden>
+        <button data-act="export">⬇️ Esporta le mie liste</button>
+        <button data-act="import">⬆️ Importa liste</button>
+        <button data-act="logout">🚪 Esci</button>
+      </div>
+      <input type="file" id="importFile" accept="application/json" hidden>
+    </header>
+
+    <main>
+      <!-- LUOGHI -->
+      <section id="tab-places" class="tab active">
+        <form class="search" data-kind="places">
+          <input type="search" name="q" placeholder="Cerca un luogo: Colosseo, Pantheon…" autocomplete="off">
+          <button class="btn primary" type="submit">Cerca</button>
+        </form>
+        <div class="chips" id="placeChips"></div>
+        <div class="results" id="placesResults"></div>
+        <div class="list-head">
+          <h2>I miei luoghi</h2>
+          <div class="seg" data-list="places">
+            <button data-f="todo" class="on">Da visitare</button>
+            <button data-f="done">Visitati</button>
+            <button data-f="map">Mappa</button>
+          </div>
+        </div>
+        <div class="list" id="placesList"></div>
+      </section>
+
+      <!-- RISTORANTI -->
+      <section id="tab-food" class="tab">
+        <form class="search" data-kind="food">
+          <input type="search" name="q" placeholder="Cerca un ristorante per nome…" autocomplete="off">
+          <button class="btn primary" type="submit">Cerca</button>
+        </form>
+        <div class="row-actions">
+          <button class="btn" id="foodNear">📍 Ristoranti vicino a me</button>
+          <button class="btn" id="foodManual">✏️ Aggiungi a mano</button>
+        </div>
+        <div class="results" id="foodResults"></div>
+        <div class="list-head">
+          <h2>I miei ristoranti</h2>
+          <div class="seg" data-list="food">
+            <button data-f="todo" class="on">Da provare</button>
+            <button data-f="done">Provati</button>
+            <button data-f="map">Mappa</button>
+          </div>
+        </div>
+        <div class="list" id="foodList"></div>
+      </section>
+
+      <!-- BUS / TRAM -->
+      <section id="tab-transit" class="tab">
+        <div class="card pad">
+          <button class="btn primary wide" id="locateBtn">📍 Usa la mia posizione</button>
+          <p class="muted small" id="locStatus">Attiva la geolocalizzazione per vedere fermate e linee vicine.</p>
+        </div>
+
+        <div class="card pad">
+          <h3>Dove vuoi andare?</h3>
+          <select id="destSelect">
+            <option value="">— Scegli dai tuoi luoghi e ristoranti —</option>
+          </select>
+          <div class="or">oppure</div>
+          <form id="destForm" class="search tight">
+            <input type="search" id="destInput" placeholder="Scrivi una destinazione a Roma…" autocomplete="off">
+            <button class="btn" type="submit">Cerca</button>
+          </form>
+          <div class="results" id="destResults"></div>
+          <div id="destChosen" class="dest-chosen" hidden></div>
+          <button class="btn primary wide" id="planBtn" disabled>🚌 Che linea prendo?</button>
+        </div>
+
+        <div id="map" class="map"></div>
+        <div id="planOut"></div>
+
+        <h2 class="sec-title" id="stopsTitle" hidden>Fermate vicine</h2>
+        <div id="stopsList"></div>
+        <p class="muted small foot">Dati fermate e linee: © OpenStreetMap. Gli orari in tempo reale non sono disponibili qui: per quelli usa il pulsante Google Maps.</p>
+      </section>
+    </main>
+
+    <nav class="tabs">
+      <button data-tab="places" class="on"><span>🏛️</span>Luoghi</button>
+      <button data-tab="food"><span>🍝</span>Ristoranti</button>
+      <button data-tab="transit"><span>🚋</span>Bus e Tram</button>
+    </nav>
+  </div>
+
+  <!-- Dettaglio -->
+  <div id="modal" class="modal" hidden>
+    <div class="sheet">
+      <button class="close" id="modalClose" aria-label="Chiudi">✕</button>
+      <div id="modalBody"></div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

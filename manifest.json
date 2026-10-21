@@ -1,0 +1,9 @@
+{
+  "name": "Roma in Tasca",
+  "short_name": "Roma",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#f7f2ea",
+  "theme_color": "#a63d24",
+  "icons": [{ "src": "icon.svg", "sizes": "any", "type": "image/svg+xml" }]
+}
