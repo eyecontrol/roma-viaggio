@@ -225,34 +225,41 @@ async function doSearch(kind, q) {
 }
 
 /* ---------------- Enrichment (immagine, descrizione) ---------------- */
+// Wikimedia serve in modo affidabile solo le larghezze "standard" delle miniature (es. 330, 500, 960)
+const IMG_W = 960;
 async function wikiSummary(lang, title) {
   const d = await getJSON(`https://${lang}.wikipedia.org/w/api.php?action=query&titles=${encodeURIComponent(title)}` +
-    `&prop=pageimages|extracts|info&inprop=url&piprop=thumbnail&pithumbsize=800&exintro=1&explaintext=1&exsentences=4&redirects=1&format=json&origin=*`);
+    `&prop=pageimages|extracts|info&inprop=url&piprop=thumbnail|original&pithumbsize=${IMG_W}&exintro=1&explaintext=1&exsentences=4&redirects=1&format=json&origin=*`);
   const page = Object.values(d.query?.pages || {})[0] || {};
-  return { image: page.thumbnail?.source || '', extract: page.extract || '', wiki: page.fullurl || '' };
+  return { images: [page.thumbnail?.source, page.original?.source].filter(Boolean), extract: page.extract || '', wiki: page.fullurl || '' };
 }
-const commonsUrl = (file) => `https://commons.wikimedia.org/wiki/Special:FilePath/${encodeURIComponent(file.replace(/^File:/, ''))}?width=800`;
-// Foto scattate in quel punto (Wikimedia Commons): utile anche per ristoranti e luoghi minori
+const commonsUrl = (file, w = IMG_W) => `https://commons.wikimedia.org/wiki/Special:FilePath/${encodeURIComponent(file.replace(/^File:/, ''))}?width=${w}`;
+// Foto scattate in quel punto (Wikimedia Commons)
 async function commonsNear(lat, lon, radius) {
   const d = await getJSON(`https://commons.wikimedia.org/w/api.php?action=query&generator=geosearch&ggsnamespace=6` +
-    `&ggscoord=${lat}|${lon}&ggsradius=${radius}&ggslimit=10&prop=imageinfo&iiprop=url|mime&iiurlwidth=800&format=json&origin=*`);
+    `&ggscoord=${lat}|${lon}&ggsradius=${radius}&ggslimit=10&prop=imageinfo&iiprop=url|mime&iiurlwidth=${IMG_W}&format=json&origin=*`);
   const pages = Object.values(d.query?.pages || {}).sort((a, b) => (a.index || 0) - (b.index || 0));
-  const img = pages.map((p) => p.imageinfo?.[0]).find((ii) => ii && /jpeg|png|webp/.test(ii.mime));
-  return img ? img.thumburl || img.url : '';
+  return pages.map((p) => p.imageinfo?.[0]).filter((ii) => ii && /jpeg|png|webp/.test(ii.mime)).slice(0, 2).map((ii) => ii.thumburl || ii.url);
 }
-// Ultimo ripiego, sempre disponibile: la mappa del punto
-function mapTile(lat, lon, z = 17) {
-  const n = 2 ** z, rad = (lat * Math.PI) / 180;
-  const x = Math.floor(((lon + 180) / 360) * n);
-  const y = Math.floor(((1 - Math.log(Math.tan(rad) + 1 / Math.cos(rad)) / Math.PI) / 2) * n);
-  return `https://tile.openstreetmap.org/${z}/${x}/${y}.png`;
+// Foto di anteprima del sito ufficiale (og:image), utile soprattutto per i ristoranti
+async function siteImage(url) {
+  const d = await getJSON(`https://api.microlink.io/?url=${encodeURIComponent(url)}`);
+  const u = d?.data?.image?.url;
+  return u && /^https:/.test(u) ? [u] : [];
+}
+// Varianti di una miniatura Wikimedia, se una dimensione non viene servita
+function imgVariants(u) {
+  const m = u.match(/^(https:\/\/upload\.wikimedia\.org\/.+?)\/thumb(\/.+?\/[^/]+)\/(\d+)px-[^/]+$/);
+  if (!m) return [u];
+  const base = m[1] + '/thumb' + m[2], file = m[2].split('/').pop();
+  return [u, `${base}/500px-${file}`, `${base}/330px-${file}`, m[1] + m[2]];
 }
 const norm = (s) => s.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
-const nameWords = (s) => norm(s).split(/[^a-z0-9]+/).filter((w) => w.length > 3 && !/^(della|delle|dello|degli|piazza|chiesa|basilica|via)$/.test(w));
+const nameWords = (s) => norm(s).split(/[^a-z0-9]+/).filter((w) => w.length > 3 && !/^(della|delle|dello|degli|piazza|chiesa|basilica|via|ristorante|trattoria|osteria|pizzeria)$/.test(w));
 
 async function enrich(it, kind) {
   let t = it.tags || {};
-  const out = {};
+  const out = { images: [] };
   // Risultato da Photon: recupera prima i tag OSM completi
   if (it.needTags && it.osm) {
     try {
@@ -266,7 +273,11 @@ async function enrich(it, kind) {
       }
     } catch {}
   }
-  const merge = (s) => { if (!s) return; out.image = out.image || s.image; out.extract = out.extract || s.extract; out.wiki = out.wiki || s.wiki; };
+  const add = (arr) => arr.forEach((u) => u && !out.images.includes(u) && out.images.push(u));
+  const merge = (s) => { if (!s) return; add(s.images); out.extract = out.extract || s.extract; out.wiki = out.wiki || s.wiki; };
+  const site = () => it.website || out.website || t.website || t['contact:website'];
+
+  if (kind === 'food' && site()) { try { add(await siteImage(site())); } catch {} }
   try {
     if (t.wikipedia) {
       const [lang, ...rest] = t.wikipedia.split(':');
@@ -274,56 +285,61 @@ async function enrich(it, kind) {
     }
   } catch {}
   try {
-    if (t.wikidata && (!out.image || !out.extract)) {
+    if (t.wikidata) {
       const d = await getJSON(`https://www.wikidata.org/w/api.php?action=wbgetentities&ids=${t.wikidata}&props=sitelinks|claims&format=json&origin=*`);
       const ent = d.entities?.[t.wikidata];
       const p18 = ent?.claims?.P18?.[0]?.mainsnak?.datavalue?.value;
-      if (!out.image && p18) out.image = commonsUrl(p18);
+      if (p18) add([commonsUrl(p18), commonsUrl(p18, 500)]);
       const sl = ent?.sitelinks?.itwiki || ent?.sitelinks?.enwiki;
-      if (sl && (!out.extract || !out.image)) merge(await wikiSummary(sl.site === 'itwiki' ? 'it' : 'en', sl.title));
+      if (sl && (!out.extract || !out.images.length)) merge(await wikiSummary(sl.site === 'itwiki' ? 'it' : 'en', sl.title));
       const web = ent?.claims?.P856?.[0]?.mainsnak?.datavalue?.value;
       if (web && !it.website && !out.website) out.website = web;
     }
   } catch {}
-  if (!out.image && t.image && /^https?:/.test(t.image)) out.image = t.image;
-  if (!out.image && t.wikimedia_commons && /^File:/.test(t.wikimedia_commons)) out.image = commonsUrl(t.wikimedia_commons);
+  if (t.image && /^https?:/.test(t.image)) add([t.image]);
+  if (t.wikimedia_commons && /^File:/.test(t.wikimedia_commons)) add([commonsUrl(t.wikimedia_commons)]);
   // Voce Wikipedia vicina con un nome simile
-  if (!out.image && it.lat != null) {
+  if (!out.images.length && it.lat != null) {
     try {
-      const g = await getJSON(`https://it.wikipedia.org/w/api.php?action=query&list=geosearch&gscoord=${it.lat}|${it.lon}&gsradius=${kind === 'food' ? 60 : 400}&gslimit=15&format=json&origin=*`);
+      const g = await getJSON(`https://it.wikipedia.org/w/api.php?action=query&list=geosearch&gscoord=${it.lat}|${it.lon}&gsradius=${kind === 'food' ? 60 : 500}&gslimit=20&format=json&origin=*`);
       const words = nameWords(it.name);
       const hit = (g.query?.geosearch || []).find((p) => words.some((w) => norm(p.title).includes(w)));
       if (hit) merge(await wikiSummary('it', hit.title));
     } catch {}
   }
   // Ricerca testuale su Wikipedia (solo luoghi)
-  if (!out.image && kind === 'places') {
+  if (!out.images.length && kind === 'places') {
     try {
       const w = await wikiSuggest(it.name);
-      if (w.titles[0]) {
-        const s = await wikiSummary('it', w.titles[0]);
-        const words = nameWords(it.name);
-        if (words.some((x) => norm(w.titles[0]).includes(x))) merge(s);
-      }
+      const words = nameWords(it.name);
+      const title = w.titles.find((x) => words.some((y) => norm(x).includes(y)));
+      if (title) merge(await wikiSummary('it', title));
     } catch {}
   }
-  if (!out.image && it.lat != null) { try { out.image = await commonsNear(it.lat, it.lon, kind === 'food' ? 40 : 120); } catch {} }
-  if (!out.image && it.lat != null) { out.image = mapTile(it.lat, it.lon); out.isMap = true; }
+  if (!out.images.length && kind === 'places' && site()) { try { add(await siteImage(site())); } catch {} }
+  if (!out.images.length && it.lat != null) { try { add(await commonsNear(it.lat, it.lon, kind === 'food' ? 30 : 150)); } catch {} }
+  out.image = out.images[0] || '';
   return out;
 }
 
+const IMG_V = 3; // versione della logica immagini: gli elementi con versione precedente vengono rielaborati
 function applyEnrich(cur, extra) {
-  cur.image = extra.image || ''; cur.isMap = !!extra.isMap;
+  if (!cur.customPhoto) { cur.image = extra.image || ''; cur.images = extra.images || []; }
+  delete cur.isMap;
   cur.extract = cur.extract || extra.extract || ''; cur.wiki = cur.wiki || extra.wiki || '';
   for (const f of ['hours', 'price', 'website', 'phone', 'cuisine', 'address']) if (extra[f] && !cur[f]) cur[f] = extra[f];
   if (extra.tags) cur.tags = extra.tags;
-  delete cur.needTags; cur.loading = false; cur.v = 2;
+  delete cur.needTags; cur.loading = false; cur.v = IMG_V;
 }
-// Rielabora i preferiti salvati prima di questa versione o senza foto
+// Aggiorna le foto degli elementi gia' salvati con la logica attuale
 async function refreshMissing() {
   for (const kind of ['places', 'food']) {
-    for (const it of lists[kind].filter((x) => (!x.image || x.isMap) && x.v !== 2 && x.lat != null)) {
-      try { applyEnrich(it, await enrich(it, kind)); save(kind); renderList(kind); } catch {}
+    const todo = lists[kind].filter((x) => x.v !== IMG_V && !x.customPhoto);
+    todo.forEach((x) => (x.loading = true));
+    if (todo.length) renderList(kind);
+    for (const it of todo) {
+      try { applyEnrich(it, await enrich(it, kind)); } catch { it.loading = false; }
+      save(kind); renderList(kind);
     }
   }
 }
@@ -351,12 +367,18 @@ function addItem(kind, c) {
 const emoji = (kind, it) => (kind === 'food' ? (/(cafe|bar)/.test(it.kind) ? '☕' : /ice_cream/.test(it.kind) ? '🍨' : /pizza/i.test(it.cuisine) ? '🍕' : '🍝') : '🏛️');
 let posNow = null; // ultima posizione nota
 
-// <img> con ripiego: se la foto non si carica mostra la mappa del punto, poi l'emoji
+// <img> con ripiego: prova le altre foto trovate, poi l'emoji
 function imgTag(it, kind) {
-  const fb = it.lat != null && !it.isMap ? mapTile(it.lat, it.lon) : '';
-  return `<img src="${esc(it.image)}" alt="" loading="lazy" referrerpolicy="no-referrer" ` +
-    `onerror="if(this.dataset.fb){this.src=this.dataset.fb;this.dataset.fb='';}else{this.replaceWith(document.createTextNode('${emoji(kind, it)}'));}" data-fb="${esc(fb)}">`;
+  const list = [...new Set((it.images && it.images.length ? it.images : [it.image]).flatMap(imgVariants))];
+  if (it.customPhoto) list.unshift(it.image);
+  const [first, ...alts] = [...new Set(list)];
+  return `<img src="${esc(first)}" alt="" loading="lazy" data-alts="${esc(alts.join(' '))}" data-e="${emoji(kind, it)}" onerror="imgFail(this)">`;
 }
+window.imgFail = (el) => {
+  const alts = (el.dataset.alts || '').split(' ').filter(Boolean);
+  if (alts.length) { el.dataset.alts = alts.slice(1).join(' '); el.src = alts[0]; }
+  else el.replaceWith(document.createTextNode(el.dataset.e || '🏛️'));
+};
 
 function renderList(kind) {
   const box = kind === 'places' ? $('#placesList') : $('#foodList');
@@ -477,8 +499,11 @@ function openDetail(kind, it) {
       lists[kind] = lists[kind].filter((x) => x.id !== it.id); save(kind); renderList(kind); refreshDestSelect(); closeModal();
     } else if (e.target.closest('[data-bus]')) { closeModal(); planTo(it); }
     else if (e.target.closest('[data-photo]')) {
-      const u = prompt('Incolla il link di una foto (es. da Google Immagini: tieni premuto sulla foto → Copia indirizzo immagine):', it.isMap ? '' : it.image || '');
-      if (u && /^https?:\/\//.test(u.trim())) { it.image = u.trim(); it.isMap = false; save(kind); renderList(kind); openDetail(kind, it); }
+      const u = prompt('Incolla il link di una foto (es. da Google Immagini: tieni premuto sulla foto → Copia indirizzo immagine). Lascia vuoto per tornare alla foto automatica:', it.customPhoto ? it.image : '');
+      if (u === null) return;
+      if (u.trim() && /^https?:\/\//.test(u.trim())) { it.image = u.trim(); it.customPhoto = true; }
+      else if (!u.trim()) { it.customPhoto = false; it.image = (it.images || [])[0] || ''; }
+      save(kind); renderList(kind); openDetail(kind, it);
     }
   };
   $('#modal').hidden = false;
