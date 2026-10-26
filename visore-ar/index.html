@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Visore AR Macchina</title>
+<meta name="robots" content="noindex">
+<meta name="theme-color" content="#1c1f22">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Condensed:wght@600;700&family=JetBrains+Mono:wght@400;500&display=swap">
+<script type="module" src="https://cdn.jsdelivr.net/npm/@google/model-viewer@3.5.0/dist/model-viewer.min.js"></script>
+<style>
+/* Una colonna: carica GLB → anteprima → AR. Giallo di sicurezza (RAL 1003) solo sull'azione principale. */
+:root {
+  --bg: #eef0f1; --panel: #ffffff; --fg: #1c1f22; --muted: #5d656c; --line: #d3d8dc;
+  --accent: #f5b800; --accent-ink: #1c1f22; --stage: #dfe3e6; --bad: #b3261e;
+  --display: "Barlow Condensed", "Arial Narrow", sans-serif;
+  --body: "Barlow", system-ui, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #141618; --panel: #1e2124; --fg: #e8ebed; --muted: #9aa3aa; --line: #2f3439;
+          --accent-ink: #141618; --stage: #24282c; --bad: #ff8a80; color-scheme: dark; }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body {
+  background: var(--bg); color: var(--fg); font: 16px/1.5 var(--body);
+  padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) max(24px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+}
+main { max-width: 760px; margin: 0 auto; display: flex; flex-direction: column; gap: 14px; }
+header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+h1 { font: 700 1.9rem/1 var(--display); margin: 0; text-transform: uppercase; letter-spacing: .01em; }
+h1 span { color: var(--muted); font-weight: 600; }
+.tag { font: 500 .72rem var(--mono); color: var(--muted); letter-spacing: .06em; text-transform: uppercase; }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+.drop { position: relative; border: 2px dashed var(--line); border-radius: 8px; padding: 18px 14px; text-align: center; cursor: pointer; display: flex; flex-direction: column; gap: 4px; align-items: center; }
+.drop:hover, .drop:focus-within { border-color: var(--accent); }
+.drop strong { font: 600 1.2rem var(--display); text-transform: uppercase; letter-spacing: .03em; }
+.drop small { color: var(--muted); }
+.drop input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+.opts { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; }
+label.f { display: flex; flex-direction: column; gap: 4px; font-size: .78rem; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+select { font: 500 1rem var(--body); padding: 10px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); }
+.check { display: flex; gap: 8px; align-items: center; }
+.check input { width: 20px; height: 20px; accent-color: var(--accent); }
+#status { font: 400 .85rem var(--mono); color: var(--muted); min-height: 1.3em; }
+#status.err { color: var(--bad); }
+.stage { position: relative; background: var(--stage); border-radius: 10px; overflow: hidden; border: 1px solid var(--line); }
+model-viewer { width: 100%; height: min(60vh, 520px); background: transparent; }
+.empty { position: absolute; inset: 0; display: grid; place-items: center; text-align: center; color: var(--muted); padding: 24px; pointer-events: none; }
+.ar-btn { position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%); background: var(--accent); color: var(--accent-ink); border: 0; border-radius: 999px; font: 700 1.1rem var(--display); text-transform: uppercase; letter-spacing: .05em; padding: 14px 26px; box-shadow: 0 4px 14px rgba(0,0,0,.25); white-space: nowrap; }
+.dims { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.dim { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.dim b { font: 500 1.1rem var(--mono); font-variant-numeric: tabular-nums; }
+.dim span { font-size: .72rem; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; }
+.meta { font: 400 .8rem var(--mono); color: var(--muted); }
+button:focus-visible, select:focus-visible, .drop:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
+.help { font-size: .9rem; color: var(--muted); margin: 0; padding-left: 18px; }
+.help li + li { margin-top: 4px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Visore AR <span>GLB</span></h1>
+    <span class="tag">ARCore · scala 1:1</span>
+  </header>
+
+  <section class="panel">
+    <label class="drop">
+      <input type="file" id="file" accept=".glb,model/gltf-binary,application/octet-stream">
+      <strong>Scegli il file GLB</strong>
+      <small>Resta sul telefono, nessun upload</small>
+    </label>
+    <div class="opts">
+      <label class="f">Unità del file
+        <select id="unit">
+          <option value="auto" selected>Automatica</option>
+          <option value="m">Metri (standard glTF)</option>
+          <option value="mm">Millimetri</option>
+        </select>
+      </label>
+      <label class="f">Asse verticale
+        <select id="up">
+          <option value="y" selected>Y in alto (standard glTF)</option>
+          <option value="z">Z in alto (CAD)</option>
+        </select>
+      </label>
+    </div>
+    <label class="check"><input type="checkbox" id="lock" checked> Blocca scala reale 1:1 in AR</label>
+    <div id="status">Pronto.</div>
+  </section>
+
+  <section class="stage">
+    <model-viewer id="mv" camera-controls touch-action="pan-y" shadow-intensity="0.8"
+      ar ar-modes="webxr scene-viewer quick-look" ar-scale="fixed" ar-placement="floor" interaction-prompt="none">
+      <button slot="ar-button" class="ar-btn" type="button">Vedi nel tuo spazio</button>
+    </model-viewer>
+    <div class="empty" id="empty">Carica il GLB per l'anteprima.<br>Poi premi «Vedi nel tuo spazio» per aprire la fotocamera.</div>
+  </section>
+
+  <section class="panel" id="info" hidden>
+    <div class="dims">
+      <div class="dim"><span>Larghezza</span><b id="dx">–</b></div>
+      <div class="dim"><span>Profondità</span><b id="dz">–</b></div>
+      <div class="dim"><span>Altezza</span><b id="dy">–</b></div>
+    </div>
+    <div class="meta" id="meta"></div>
+  </section>
+
+  <section class="panel">
+    <ul class="help">
+      <li>In AR inquadra il pavimento e muovi lentamente il telefono finché compare la macchina, poi girale intorno.</li>
+      <li>Trascina per spostarla, ruota con due dita. Con la scala bloccata resta a dimensione reale.</li>
+      <li>Controlla le misure qui sopra: se sono 1000 volte sbagliate, imposta «Unità del file» su Millimetri.</li>
+      <li>Se la macchina appare sdraiata, imposta «Asse verticale» su Z.</li>
+    </ul>
+  </section>
+</main>
+
+<script type="module">
+const $ = id => document.getElementById(id);
+const mv = $("mv"), status = $("status");
+let url = null, file = null, raw = null;
+
+const say = (t, err = false) => { status.textContent = t; status.classList.toggle("err", err); };
+const mm = v => Math.round(v * 1000).toLocaleString("it-IT") + " mm";
+
+function applyTransform() {
+  if (!raw) return;
+  const up = $("up").value;
+  // Z in alto → ruota di -90° attorno a X
+  mv.orientation = up === "z" ? "0deg -90deg 0deg" : "0deg 0deg 0deg"; // ordine model-viewer: roll(Z) pitch(X) yaw(Y)
+  let unit = $("unit").value;
+  const maxDim = Math.max(raw.x, raw.y, raw.z);
+  if (unit === "auto") unit = maxDim > 50 ? "mm" : "m"; // oltre 50 m è quasi certamente in mm
+  const s = unit === "mm" ? 0.001 : 1;
+  mv.scale = `${s} ${s} ${s}`;
+  // dimensioni reali dopo scala/rotazione
+  const d = up === "z" ? { x: raw.x * s, y: raw.z * s, z: raw.y * s } : { x: raw.x * s, y: raw.y * s, z: raw.z * s };
+  $("dx").textContent = mm(d.x); $("dz").textContent = mm(d.z); $("dy").textContent = mm(d.y);
+  $("meta").textContent = `${file.name} · ${(file.size / 1048576).toFixed(1)} MB · unità: ${unit === "mm" ? "millimetri" : "metri"}`;
+  $("info").hidden = false;
+}
+
+mv.addEventListener("load", () => {
+  $("empty").hidden = true;
+  mv.scale = "1 1 1"; mv.orientation = "0deg 0deg 0deg";
+  const d = mv.getDimensions(); raw = { x: d.x, y: d.y, z: d.z };
+  applyTransform();
+  if (mv.canActivateAR) say("Modello pronto. Premi «Vedi nel tuo spazio».");
+  else say("Modello caricato, ma l'AR non è disponibile: apri il link in Chrome su Android.", true);
+});
+mv.addEventListener("ar-status", e => {
+  if (e.detail.status === "failed") say("AR non avviata. Aggiorna «Google Play Services per AR» dal Play Store e riprova.", true);
+});
+mv.addEventListener("error", () => say("Il file non è un GLB valido o è danneggiato. Riesportalo come glTF binario (.glb).", true));
+
+$("file").addEventListener("change", e => {
+  const f = e.target.files[0]; if (!f) return;
+  if (!/\.glb$/i.test(f.name)) { say("Serve un file .glb. Se hai un .gltf, riesportalo come binario.", true); return; }
+  file = f; raw = null;
+  say(`Carico ${f.name}…`);
+  if (url) URL.revokeObjectURL(url);
+  url = URL.createObjectURL(f);
+  mv.src = url;
+});
+$("unit").addEventListener("change", applyTransform);
+$("up").addEventListener("change", applyTransform);
+$("lock").addEventListener("change", e => mv.setAttribute("ar-scale", e.target.checked ? "fixed" : "auto"));
+</script>
+</body>
+</html>
